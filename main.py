@@ -1,71 +1,83 @@
-import os
-import time
-from dotenv import load_dotenv
-from pageindex import PageIndexClient
-from langchain_google_genai import ChatGoogleGenerativeAI
+import fitz  # PyMuPDF
+from rank_bm25 import BM25Okapi
+from langchain_community.chat_models import ChatOllama
 
-# ---------------- LOAD ENV ----------------
-load_dotenv()
-
-# ---------------- INIT CLIENT ----------------
-pi_client = PageIndexClient(
-    api_key=os.getenv("PAGEINDEX_API_KEY")
+# ---------------- INIT LLM (LOCAL) ----------------
+llm = ChatOllama(
+    model="tinyllama",
+    temperature=0.3
 )
 
-# ---------------- INIT LLM ----------------
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash",
-    temperature=0.3,
-)
+# ---------------- EXTRACT TEXT ----------------
+def extract_text(pdf_path):
+    doc = fitz.open(pdf_path)
+    pages = []
+
+    for page_num, page in enumerate(doc):
+        text = page.get_text().strip()
+        if text:
+            pages.append({
+                "page": page_num,
+                "content": text
+            })
+
+    return pages
+
+
+# ---------------- BUILD STRUCTURE (NO CHUNKING) ----------------
+def build_structure(pages):
+    """
+    Each page = one node (NO chunking)
+    """
+    tree = []
+
+    for page in pages:
+        tree.append({
+            "id": page["page"],
+            "content": page["content"]
+        })
+
+    return tree
+
+
+# ---------------- BM25 RETRIEVAL ----------------
+def build_bm25(tree):
+    corpus = [node["content"].split() for node in tree]
+    bm25 = BM25Okapi(corpus)
+    return bm25
+
+
+# ---------------- RETRIEVE ----------------
+def retrieve(query, tree, bm25, top_k=3):
+    tokenized_query = query.split()
+    scores = bm25.get_scores(tokenized_query)
+
+    ranked_indices = sorted(
+        range(len(scores)),
+        key=lambda i: scores[i],
+        reverse=True
+    )
+
+    results = []
+    for idx in ranked_indices[:top_k]:
+        results.append(tree[idx]["content"])
+
+    return results
+
 
 # ---------------- UPLOAD + INDEX ----------------
 def upload_and_index(pdf_path):
-    doc_info = pi_client.submit_document(pdf_path)
-    doc_id = doc_info["doc_id"]
+    pages = extract_text(pdf_path)
+    tree = build_structure(pages)
+    bm25 = build_bm25(tree)
 
-    # wait until ready
-    while not pi_client.is_retrieval_ready(doc_id):
-        time.sleep(2)
+    return tree, bm25
 
-    return doc_id
-
-# ---------------- RETRIEVE ----------------
-def retrieve_from_pageindex(query, doc_id, top_k=3):
-
-    response = pi_client.submit_query(
-        doc_id=doc_id,
-        query=query
-    )
-
-    retrieval_id = response.get("retrieval_id")
-
-    while True:
-        retrieval = pi_client.get_retrieval(retrieval_id)
-        status = retrieval.get("status")
-
-        if status == "completed":
-            break
-        elif status == "failed":
-            return []
-
-        time.sleep(1)
-
-    nodes = retrieval.get("retrieved_nodes", [])
-    contexts = []
-
-    for node in nodes[:top_k]:
-        for group in node.get("relevant_contents", []):
-            for item in group:
-                content = item.get("relevant_content")
-                if content:
-                    contexts.append(content)
-
-    return contexts
 
 # ---------------- RAG ----------------
-def vectorless_rag(query, doc_id):
+def vectorless_rag(query, tree, bm25):
 
-    contexts = retrieve_from_pageindex(query, doc_id)
+    contexts = retrieve(query, tree, bm25)
 
     if not contexts:
         return "No relevant context found."
@@ -73,15 +85,17 @@ def vectorless_rag(query, doc_id):
     combined_context = "\n\n".join(contexts)
 
     prompt = f"""
-    Answer ONLY using the context below.
+Answer clearly and concisely using ONLY the context.
 
-    Context:
-    {combined_context}
+Context:
+{combined_context}
 
-    Question:
-    {query}
-    """
+Question:
+{query}
+
+Answer:
+"""
 
     response = llm.invoke(prompt)
 
-    return response.content
+    return response.content 

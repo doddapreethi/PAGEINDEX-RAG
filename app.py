@@ -12,7 +12,7 @@ DOCUMENTS_DIR = Path("documents")
 
 st.set_page_config(page_title="Vectorless RAG", layout="wide")
 
-st.title("📄 Vectorless RAG (PageIndex + Gemini)")
+st.title("📄 Vectorless RAG (Local + Ollama)")
 
 # ---------------- FILE UPLOAD ----------------
 uploaded_file = st.file_uploader("📂 Upload PDF", type=["pdf"])
@@ -28,13 +28,16 @@ if uploaded_file:
     st.success("✅ Uploaded")
 
     # ---------------- INDEX ----------------
-    if "doc_id" not in st.session_state:
-        with st.spinner("Indexing document..."):
-            st.session_state.doc_id = upload_and_index(pdf_path)
+    if "tree" not in st.session_state or "bm25" not in st.session_state:
+        with st.spinner("Processing document..."):
+            tree, bm25 = upload_and_index(pdf_path)
+            st.session_state.tree = tree
+            st.session_state.bm25 = bm25
 
-    doc_id = st.session_state.doc_id
+    tree = st.session_state.tree
+    bm25 = st.session_state.bm25
 
-    st.success(f"Indexed: {doc_id}")
+    st.success("✅ Document processed")
 
     # ---------------- QUERY ----------------
     question = st.text_input("Ask a question")
@@ -42,7 +45,7 @@ if uploaded_file:
     if st.button("Ask") and question:
 
         with st.spinner("Thinking..."):
-            answer = vectorless_rag(question, doc_id)
+            answer = vectorless_rag(question, tree, bm25)
 
         st.markdown("### ✅ Answer")
         st.write(answer)
